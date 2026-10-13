@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <title>출퇴근 관리자 | 고우에프앤비</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap wide">
+  <header class="top">
+    <div>
+      <h1>출퇴근 관리자</h1>
+      <div class="sub">고우에프앤비</div>
+    </div>
+    <button class="btn-link" id="logoutBtn" hidden>로그아웃</button>
+  </header>
+
+  <section class="card" id="loginView" style="max-width:420px;margin:0 auto">
+    <form id="loginForm">
+      <label for="pw">관리자 비밀번호</label>
+      <input id="pw" type="password" autocomplete="current-password" required>
+      <button class="btn-primary" type="submit">로그인</button>
+      <div class="msg err" id="loginMsg"></div>
+    </form>
+  </section>
+
+  <div id="mainView" hidden>
+    <div class="toolbar">
+      <input type="date" id="dateSel">
+      <select id="storeSel"><option value="">전체 매장</option></select>
+      <button id="reloadBtn">새로고침</button>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><span>전체 인원</span><b id="kTotal">-</b></div>
+      <div class="kpi in"><span>근무 중</span><b id="kWorking">-</b></div>
+      <div class="kpi out"><span>퇴근 완료</span><b id="kDone">-</b></div>
+      <div class="kpi absent"><span>미출근</span><b id="kAbsent">-</b></div>
+    </div>
+
+    <div id="stores"></div>
+    <div class="msg err" id="mainMsg"></div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const LABEL = { working: '근무 중', done: '퇴근', absent: '미출근' };
+const ORDER = { working: 0, done: 1, absent: 2 };
+let token = store.get('att_admin_token');
+let data = null;
+
+$('dateSel').value = todayStr();
+
+function showMain() {
+  $('loginView').hidden = true; $('mainView').hidden = false; $('logoutBtn').hidden = false;
+  load();
+}
+function showLogin(msg) {
+  token = null; store.del('att_admin_token');
+  $('loginView').hidden = false; $('mainView').hidden = true; $('logoutBtn').hidden = true;
+  $('loginMsg').textContent = msg || '';
+}
+
+$('loginForm').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const btn = ev.submitter; btn.disabled = true;
+  try {
+    const d = await api('adminLogin', { password: $('pw').value });
+    token = d.token; store.set('att_admin_token', token);
+    $('pw').value = '';
+    showMain();
+  } catch (e) { $('loginMsg').textContent = e.message; }
+  finally { btn.disabled = false; }
+});
+
+async function load() {
+  $('mainMsg').textContent = '';
+  $('stores').innerHTML = '<div class="card empty">불러오는 중…</div>';
+  try {
+    data = await api('adminDay', { token, date: $('dateSel').value });
+    const stores = [...new Set(data.employees.map(e => e.store))].sort();
+    const cur = $('storeSel').value;
+    $('storeSel').innerHTML = '<option value="">전체 매장</option>' +
+      stores.map(s => `<option${s === cur ? ' selected' : ''}>${escapeHtml(s)}</option>`).join('');
+    render();
+  } catch (e) {
+    if (/만료/.test(e.message)) return showLogin(e.message);
+    $('stores').innerHTML = '';
+    $('mainMsg').textContent = e.message;
+  }
+}
+
+function render() {
+  const sel = $('storeSel').value;
+  const list = data.employees.filter(e => !sel || e.store === sel);
+  const count = s => list.filter(e => e.status === s).length;
+  $('kTotal').textContent = list.length;
+  $('kWorking').textContent = count('working');
+  $('kDone').textContent = count('done');
+  $('kAbsent').textContent = count('absent');
+
+  const groups = {};
+  list.forEach(e => (groups[e.store] = groups[e.store] || []).push(e));
+  const names = Object.keys(groups).sort();
+  if (!names.length) { $('stores').innerHTML = '<div class="card empty">등록된 직원이 없습니다.</div>'; return; }
+
+  $('stores').innerHTML = names.map(name => {
+    const g = groups[name].sort((a, b) => ORDER[a.status] - ORDER[b.status] || a.name.localeCompare(b.name));
+    const n = g.length;
+    const w = g.filter(e => e.status === 'working').length;
+    const d = g.filter(e => e.status === 'done').length;
+    const pct = v => (v / n * 100).toFixed(1) + '%';
+    return `<section class="card">
+      <div class="store-head"><h2>${escapeHtml(name)}</h2><small>출근 ${w + d} / ${n}명</small></div>
+      <div class="bar">
+        <i style="width:${pct(w)};background:var(--in)"></i>
+        <i style="width:${pct(d)};background:var(--out)"></i>
+      </div>
+      <div class="table-scroll"><table>
+        <thead><tr><th>사번</th><th>이름</th><th>상태</th><th>출근</th><th>퇴근</th><th class="num">근무시간</th></tr></thead>
+        <tbody>${g.map(e => `<tr>
+          <td>${escapeHtml(e.empId)}</td>
+          <td>${escapeHtml(e.name)}</td>
+          <td><span class="pill ${e.status}">${LABEL[e.status]}</span></td>
+          <td>${e.inAt || '-'}</td>
+          <td>${e.outAt || '-'}</td>
+          <td class="num">${fmtMinutes(e.minutes)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+    </section>`;
+  }).join('');
+}
+
+$('dateSel').onchange = load;
+$('storeSel').onchange = render;
+$('reloadBtn').onclick = load;
+$('logoutBtn').onclick = () => showLogin();
+
+if (token) showMain();
+</script>
+</body>
+</html>

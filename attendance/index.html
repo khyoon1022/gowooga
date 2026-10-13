@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <title>출퇴근 기록 | 고우에프앤비</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>출퇴근 기록</h1>
+      <div class="sub" id="who">고우에프앤비</div>
+    </div>
+    <button class="btn-link" id="logoutBtn" hidden>로그아웃</button>
+  </header>
+
+  <!-- 로그인 -->
+  <section class="card" id="loginView">
+    <form id="loginForm">
+      <label for="empId">사번</label>
+      <input id="empId" inputmode="numeric" autocomplete="username" required>
+      <label for="pin">PIN</label>
+      <input id="pin" type="password" inputmode="numeric" autocomplete="current-password" required>
+      <button class="btn-primary" type="submit">로그인</button>
+      <div class="msg" id="loginMsg"></div>
+    </form>
+  </section>
+
+  <!-- 출퇴근 -->
+  <div id="mainView" hidden>
+    <section class="card">
+      <div class="clock">
+        <div class="time" id="clockTime">--:--:--</div>
+        <div class="date" id="clockDate"></div>
+      </div>
+      <div class="status" id="statusBox"></div>
+      <div class="punch">
+        <button class="in" id="inBtn">출근</button>
+        <button class="out" id="outBtn">퇴근</button>
+      </div>
+      <div class="msg" id="punchMsg"></div>
+    </section>
+
+    <section class="card">
+      <div class="row-between month-nav">
+        <h2 style="font-size:16px;margin:0">내 기록</h2>
+        <div>
+          <button id="prevM">‹</button><strong id="monthLabel"></strong><button id="nextM">›</button>
+        </div>
+      </div>
+      <div class="summary">
+        <div><span>근무일수</span><b id="sumDays">-</b></div>
+        <div><span>총 근무시간</span><b id="sumTime">-</b></div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>날짜</th><th>출근</th><th>퇴근</th><th class="num">근무</th></tr></thead>
+          <tbody id="recBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const DOW = ['일', '월', '화', '수', '목', '금', '토'];
+let token = store.get('att_token');
+let month = todayStr().slice(0, 7);
+
+function tick() {
+  const now = new Date();
+  $('clockTime').textContent = new Date(now.getTime() + 9 * 3600 * 1000).toISOString().slice(11, 19);
+  $('clockDate').textContent = now.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short', timeZone: 'Asia/Seoul' });
+}
+setInterval(tick, 1000); tick();
+
+function showMain(info) {
+  $('loginView').hidden = true;
+  $('mainView').hidden = false;
+  $('logoutBtn').hidden = false;
+  $('who').textContent = `${info.name} · ${info.store}`;
+  renderStatus(info.status);
+  loadRecords();
+}
+
+function showLogin(msg) {
+  token = null;
+  store.del('att_token'); store.del('att_info');
+  $('loginView').hidden = false;
+  $('mainView').hidden = true;
+  $('logoutBtn').hidden = true;
+  $('who').textContent = '고우에프앤비';
+  $('loginMsg').textContent = msg || '';
+  $('loginMsg').className = 'msg err';
+}
+
+function renderStatus(s) {
+  if (!s) return;
+  $('statusBox').innerHTML = s.working
+    ? `<span class="pill working">근무 중</span> <span style="color:var(--muted)">${escapeHtml(s.since)} 출근</span>`
+    : `<span class="pill off">퇴근 상태</span>`;
+  $('inBtn').disabled = !!s.working;
+  $('outBtn').disabled = !s.working;
+}
+
+function handleErr(e, box) {
+  if (/만료/.test(e.message)) return showLogin(e.message);
+  box.textContent = e.message;
+  box.className = 'msg err';
+}
+
+$('loginForm').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const btn = ev.submitter; btn.disabled = true;
+  $('loginMsg').textContent = '';
+  try {
+    const d = await api('login', { empId: $('empId').value.trim(), pin: $('pin').value.trim() });
+    token = d.token;
+    store.set('att_token', token);
+    store.set('att_info', JSON.stringify({ name: d.name, store: d.store }));
+    $('pin').value = '';
+    showMain(d);
+  } catch (e) {
+    $('loginMsg').textContent = e.message; $('loginMsg').className = 'msg err';
+  } finally { btn.disabled = false; }
+});
+
+async function punch(type) {
+  const label = type === 'in' ? '출근' : '퇴근';
+  if (!confirm(`${label} 처리하시겠습니까?`)) return;
+  $('inBtn').disabled = $('outBtn').disabled = true;
+  $('punchMsg').textContent = '처리 중…'; $('punchMsg').className = 'msg';
+  try {
+    const d = await api('punch', { token, type });
+    $('punchMsg').textContent = type === 'in'
+      ? `${d.at} 출근 완료`
+      : `${d.at} 퇴근 완료 (근무 ${fmtMinutes(d.minutes)})`;
+    $('punchMsg').className = 'msg ok';
+    renderStatus(d.status);
+    loadRecords();
+  } catch (e) {
+    handleErr(e, $('punchMsg'));
+    refreshStatus();
+  }
+}
+$('inBtn').onclick = () => punch('in');
+$('outBtn').onclick = () => punch('out');
+
+async function refreshStatus() {
+  try {
+    renderStatus(await api('status', { token }));
+  } catch (e) {
+    $('inBtn').disabled = $('outBtn').disabled = false;
+  }
+}
+
+async function loadRecords() {
+  const [y, m] = month.split('-');
+  $('monthLabel').textContent = `${y}.${m}`;
+  $('nextM').disabled = month >= todayStr().slice(0, 7);
+  $('recBody').innerHTML = '<tr><td colspan="4" class="empty">불러오는 중…</td></tr>';
+  try {
+    const d = await api('myRecords', { token, month });
+    $('sumDays').textContent = `${d.days}일`;
+    $('sumTime').textContent = fmtMinutes(d.totalMinutes);
+    $('recBody').innerHTML = d.records.length ? d.records.map(r => {
+      const dt = new Date(r.date + 'T00:00:00');
+      return `<tr>
+        <td>${r.date.slice(5).replace('-', '/')} (${DOW[dt.getDay()]})</td>
+        <td>${r.inAt}</td>
+        <td>${r.outAt ? r.outAt + (r.outNextDay ? '<span class="next">+1</span>' : '') : '<span class="pill working">근무 중</span>'}</td>
+        <td class="num">${fmtMinutes(r.minutes)}</td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="4" class="empty">기록이 없습니다.</td></tr>';
+  } catch (e) {
+    if (/만료/.test(e.message)) return showLogin(e.message);
+    $('recBody').innerHTML = `<tr><td colspan="4" class="empty">${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function shiftMonth(delta) {
+  const [y, m] = month.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  loadRecords();
+}
+$('prevM').onclick = () => shiftMonth(-1);
+$('nextM').onclick = () => shiftMonth(1);
+$('logoutBtn').onclick = () => showLogin();
+
+// 저장된 로그인 복원 (상태 확인을 위해 서버에 재조회)
+(async () => {
+  if (!token) return;
+  const info = JSON.parse(store.get('att_info') || '{}');
+  try {
+    const d = await api('status', { token });
+    showMain(Object.assign(info, { status: d }));
+  } catch (e) {
+    showLogin(/만료/.test(e.message) ? '' : e.message);
+  }
+})();
+</script>
+</body>
+</html>
